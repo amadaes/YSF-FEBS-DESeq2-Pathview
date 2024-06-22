@@ -7,7 +7,7 @@ R scripts used for:
 - DEP_results_clean_up_rescaled_as_LFC: cleaning up and rescaling differentially expressed protein results obtained using MS/MS data (Scaffold output)
     - for loop which processes all CSV files in the specified path
     - extract gene/ protein IDs and names from a comma-separated field and add them to a data frame
-    - mutate/ re-scale the fold change values to be mappable on the same value scale as the RNA-seq data (for generating figures with Pathwview)
+    - mutate/ re-scale the fold change values to be mappable on the same value scale as the RNA-seq data (for generating figures with Pathview)
 - functional_enrichment:
     - create a custom AnnotationDBI database using NCBI Annotation package
     - read data frames containing DEG (DESeq2 results - output of DESeq2_analysis_and_interpretation) and DEP (Scaffold results - output of DEP_results_clean_up_rescaled_as_LFC) and generate the genes and gene_list objects necessary for functional enrichment
