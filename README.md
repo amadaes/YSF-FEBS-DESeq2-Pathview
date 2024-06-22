@@ -1,4 +1,15 @@
 R scripts used for:
-- generating and visualizing differential expression analysis results for RNA-seq data using DESeq2 starting from a raw counts matrix obtained using featureCounts
-- cleaning up and rescaling differentially expressed protein results obtained using MS/MS data
-- making a custom AnnotationDBI database, integrating and vizualizing enriched pathways from DEG and DEP using the Pathview package
+- DESeq2_analysis_and_interpretation:
+    - read in count matrix from featureCounts (countData) and create colData file needed for DESeqDataSetFromMatrix
+    - generate differential expression analysis results for RNA-seq data using DESeq2
+    - perform sample quality assurance using the regular log transformation and the limma package to control for variability between replicates (generate PCA plots, sample heatmaps etc.)
+    - generate plots for visualizing DE results (dispersion plots, MA plots, volcano plots, gene heatmaps etc.)
+- DEP_results_clean_up_rescaled_as_LFC: cleaning up and rescaling differentially expressed protein results obtained using MS/MS data (Scaffold output)
+    - for loop which processes all CSV files in the specified path
+    - extract gene/ protein IDs and names from a comma-separated field and add them to a data frame
+    - mutate/ re-scale the fold change values to be mappable on the same value scale as the RNA-seq data (for generating figures with Pathwview)
+- functional_enrichment:
+    - create a custom AnnotationDBI database using NCBI Annotation package
+    - read data frames containing DEG (DESeq2 results - output of DESeq2_analysis_and_interpretation) and DEP (Scaffold results - output of DEP_results_clean_up_rescaled_as_LFC) and generate the genes and gene_list objects necessary for functional enrichment
+    - perform gene, module and pathway enrichment analysis using ClusterProfiler (DOSE, KEGG etc.)
+    - use for loop to generate all the figures for significantly enriched pathways (for combined DEG and DEP data) using the Pathview package
