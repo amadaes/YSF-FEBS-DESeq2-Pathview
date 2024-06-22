@@ -1,0 +1,699 @@
+#activate BiocManager, Biobase, BioGenerics, IRanges, S4Vectors
+#Install DESeq2, apeglm, vsn packages from Bioconductor if required (not yet installed)
+if (!require("BiocManager", quietly = TRUE)) install.packages("BiocManager") 
+if (!require("stringr", quietly = TRUE)) install.packages("stringr")
+if (!require("DESeq2", quietly = TRUE)) BiocManager::install("DESeq2") 
+if (!require("vsn", quietly = TRUE)) BiocManager::install("vsn")
+if (!require("limma", quietly = TRUE)) BiocManager::install("limma")
+if (!require("tidyverse", quietly = TRUE)) install.packages("tidyverse")
+if (!require("Cairo", quietly = TRUE)) install.packages("Cairo")
+
+library("tidyverse")
+library("Cairo")
+
+#if (!require("apeglm", quietly = TRUE)) BiocManager::install("apeglm") 
+#if (!require("genefilter", quietly = TRUE)) BiocManager::install("genefilter")
+#library("pheatmap")
+
+#Create and set output directory
+library(stringr)
+dir.create("D:/Activitati/Doctorat/4_REFERAT2/date/DESeq2_analysis_results/kept_samples_DE_analysis")
+setwd("D:/Activitati/Doctorat/4_REFERAT2/date/DESeq2_analysis_results/kept_samples_DE_analysis")
+
+# Import & pre-process featureCounts raw counts (countData) and sample info (colData) -----------------------------------------------------
+##import count table from featurecounts and assign it to countdata
+countdata <- data.frame(read.table("D:/Activitati/Doctorat/4_REFERAT2/DESeq/RAW_DATA/all_samples/ids_and_counts.txt", sep=",", header=TRUE, skip = 0))
+# symbols <- read.table("D:/Activitati/Doctorat/4_REFERAT2/DESeq/RAW_DATA/all_samples/ids_and_counts.txt", sep=",", header=TRUE, skip = 0)
+# symbols <- symbols[,-1]
+# names(symbols)[names(symbols)=='Geneid'] <- 'row'
+##keep only the column with Genenames/ Geneid and counts from countdata
+countdata$Chr <- countdata$Start <- countdata$End <- countdata$Length <- countdata$Strand <- NULL
+##remove .sorted.bam or .sorted.sam from filenames
+colnames(countdata)[2:length(colnames(countdata))] <- unlist(lapply(strsplit(colnames(countdata)[2:length(colnames(countdata))], "\\."), "[[", 1))
+# Genename for volcano plots, MA plots, heatmaps etc. 
+# Genename for functional analysis: you just need to save the results table, not re-make all figures etc. 
+countdata <- aggregate(countdata[, -1:-2],countdata["Genename"],sum)
+##create a vector to keep the group and sample order  
+sample.order<-c("Genename", 
+                "no_nic_T1_R1", "no_nic_T1_R2", "no_nic_T1_R3", "no_nic_T1_R4", "no_nic_T1_R5","no_nic_T1_R6", "no_nic_T1_R7",
+                "no_nic_T2_R1", "no_nic_T2_R2", "no_nic_T2_R3", "no_nic_T2_R4", "no_nic_T2_R5","no_nic_T2_R6", "no_nic_T2_R7",
+                "no_nic_T3_R1", "no_nic_T3_R2", "no_nic_T3_R3", "no_nic_T3_R4", "no_nic_T3_R5","no_nic_T3_R6", "no_nic_T3_R7",
+                "nic_T1_R8", "nic_T1_R9", "nic_T1_R10", "nic_T1_R11", "nic_T1_R12",
+                "nic_T2_R8", "nic_T2_R9", "nic_T2_R10", "nic_T2_R11", "nic_T2_R12",
+                "nic_T3_R8", "nic_T3_R9", "nic_T3_R10", "nic_T3_R11", "nic_T3_R12",
+                "pA_R1", "pA_R2", "pA_R3",
+                "TEX_R1", "TEX_R2", "TEX_R3")
+##order sample columns as control (1,2,3,4,5 etc.) and experiment (1,2,3,4,5 etc.) using sample.order
+countdata <- countdata[ ,sample.order]
+##remove pA and TEX samples
+countdata <- subset(countdata, select=-c(pA_R1, pA_R2, pA_R3, TEX_R1, TEX_R2, TEX_R3))
+##remove Genename column from countdata table, as required for the DESeqDataSetFromMatrix input 
+countdata_no_ids <- countdata[, -1]
+rownames(countdata_no_ids) <-countdata[, 1]
+
+# uniq_ids <- make.names(countdata$Genename, unique = TRUE)
+# rownames(countdata_no_ids) <- uniq_ids
+
+##creating the coldata file: we need sample names as the first column and group classification as the second column
+##use a vector to keep sample names from countdata table to add to coldata
+sample <- colnames(countdata_no_ids)
+##use a vector to get the group names from the sample names (removes _R1, _R2 etc. from the sample names)
+group <- sub("(^[^-]+)_.*", "\\1", sample)
+# condition <- sub("(^[^-]+)_.*", "\\1", group)
+batch <- str_sub(sample, start=-3)
+batch <- sub("_", "", batch)
+# time <- str_sub(group[1:36], start= -2)
+# length(time) <- length (sample)
+# ##make the coldata dataframe using the data from the sample and group vectors
+# coldata <- data.frame(condition, time, batch, row.names = sample)
+coldata <- data.frame(group, batch, row.names = sample)
+##check that order of samples from coldata matches order of samples in count table; if not, columns will be arranged to match between files
+if (!all(rownames(coldata) == colnames(countdata_no_ids))){coldata <- coldata[match(colnames(countdata_no_ids), rownames(coldata)), ]}
+
+# Analysis with DESeq2------------------------------------------------------------------
+library("DESeq2")
+
+## ----experimental design factors------------------------------------------------------------------
+# coldata$condition <- factor(coldata$condition)
+# coldata$time <- factor(coldata$time)
+coldata$group <- factor(coldata$group)
+coldata$batch <- factor(coldata$batch)
+
+## ----create the DESeqDataSetFromMatrix------------------------------------------------------------------
+# dds <- DESeqDataSetFromMatrix(countData = countdata_no_ids, colData = coldata, design = ~ condition + time + condition:time)
+dds <- DESeqDataSetFromMatrix(countData = countdata_no_ids, colData = coldata, design = ~ group)
+
+## ----factorlvl------------------------------------------------------------------
+# #by default, factor levels are alphabetically ordered; need to specify wanted order 
+# dds$condition <- factor(dds$condition, levels = c("no_nic","nic"))
+# #print(dds$condition)
+# dds$time <- factor(dds$time, levels = c("T1", "T2", "T3"))
+# #print(dds$time)
+dds$group <- factor(dds$group, levels = c("no_nic_T1", "no_nic_T2", "no_nic_T3", "nic_T1", "nic_T2", "nic_T3"))
+
+#dds$batch <- factor(dds$batch, levels = c("R1", "R2", "R3", "R4", "R5", "R6", "R7"))
+
+dds$batch <- factor(dds$batch, levels = c("R1", "R2", "R3", "R4", "R5", "R6", "R7", "R8", "R9", "R10", "R11", "R12"))
+#print(dds$batch)
+
+# # SAMPLE QUALITY CHECKS------------------------------------------------------------------
+# #create directory in which to save initial sample QC results
+# dir.create("D:/Activitati/Doctorat/4_REFERAT2/date/DESeq2_analysis_results/all_samples_QC/")
+# setwd("D:/Activitati/Doctorat/4_REFERAT2/date/DESeq2_analysis_results/all_samples_QC/")
+# 
+# ## ----Regularized log transformation (rlog/rlogTransformation) for data visualization----------------------------------------------------
+# #if blind=FALSE rlog uses design formula to calculate the within-group variability (HERE = BIOLOGICAL REPLICATES)
+# #(https://rdrr.io/bioc/DESeq2/man/rlog.html)
+# 
+# rld_blind_F <- rlogTransformation(dds, blind=FALSE) # this will be later overwritten
+# rld_blind_F_no_limma <- rld_blind_F
+# 
+# #if blind=TRUE rlog calculates the across-all-samples variability
+# rld_blind_T <- rlogTransformation(dds, blind=TRUE)
+# 
+# #to visualize the transformed data with batch variation removed, use the removeBatchEffect function from limma
+# #this simply removes any shifts in the log2-scale expression data that can be explained by batch
+# #https://www.bioconductor.org/packages/release/bioc/vignettes/DESeq2/inst/doc/DESeq2.html#control-features-for-estimating-size-factors
+# #Why after VST are there still batches in the PCA Biplot?
+# library("limma")
+# 
+# mat <- assay(rld_blind_F)
+# mm <- model.matrix(~time+condition+condition:time, colData(rld_blind_F))
+# mat <- limma::removeBatchEffect(mat, batch=rld_blind_F$batch, design=mm)
+# assay(rld_blind_F) <- mat
+# 
+# ## ----Effects of transformations on the variance
+# # The figure below plots the standard deviation of the transformed data, across samples, against the mean, using the rlog transformation
+# #Note that the vertical axis in such plots is the square root of the variance over all samples, so including the variance due to the experimental conditions.
+# #While a flat curve of the square root of variance over the mean may seem like the goal of such transformations, this may be unreasonable in the case of datasets with many true differences due to the experimental conditions.
+# 
+# library("vsn")
+# 
+# #this one shows effect of transformation using the experimental design without limma to remove batch variation
+# grDevices::cairo_pdf(file="stdev_rld_blind_F_no_limma_vs_mean.pdf")
+# meanSdPlot(assay(rld_blind_F_no_limma))
+# dev.off()
+# 
+# #this one shows effect of transformation using the experimental design with limma to remove batch variation
+# grDevices::cairo_pdf(file="stdev_rld_blind_F_vs_mean.pdf")
+# meanSdPlot(assay(rld_blind_F))
+# dev.off()
+# 
+# #this one shows effect of transformation across all samples without accounting for experimental design
+# grDevices::cairo_pdf(file="stdev_rld_blind_T_vs_mean.pdf")
+# meanSdPlot(assay(rld_blind_T))
+# dev.off()
+# 
+# ## ----Sample distance heatmap ------------------------------------------------
+# 
+# # Colours for plots below
+# ##use RColorBrewer or any from https://github.com/EmilHvitfeldt/r-color-palettes
+# #library("RColorBrewer") or make a vector for color values wanted (can also make a gradient using https://mycolor.space/gradient3
+# # #ff0000, #ff5400, #ff7b00, #ff9b19, #ffb73a, #ffab3f, #ff9f44, #ff944a, #ff5658, #ff0084, #d300c2, #0432ff
+# mycols <- c("#ff0000", "#FFD966","#0432FF", "#3b3b3b", "#777777", "#b9b9b9")
+# 
+# #this one for sample distance calculated using rlog transformation using the experimental design (blind=FALSE) without limma to remove batch variation
+# library(gplots)
+# 
+# sampleDists <- as.matrix(dist(t(assay(rld_blind_F_no_limma))))
+# ncol(sampleDists)
+# 
+# grDevices::cairo_pdf(file="qc-heatmap-samples_rld_blind_F_no_limma.pdf", width=20, height=20, pointsize=25)
+# heatmap.2(as.matrix(sampleDists), key=T, key.xlab="Value", key.ylab="count", symkey=FALSE, keysize= 0.2, trace="none", key.par = list(cex=0.8), lhei=c(1.5,3), lwid=c(3,6),
+#           col=colorpanel(50, "black", "white"),
+#           margin=c(10, 10))
+# dev.off()
+# 
+# #this one for sample distance calculated using rlog transformation using the experimental design to remove batch variation (blind=FALSE)
+# 
+# sampleDists <- as.matrix(dist(t(assay(rld_blind_F))))
+# ncol(sampleDists)
+# 
+# grDevices::cairo_pdf(file="qc-heatmap-samples_rld_blind_F.pdf", width=20, height=20, pointsize=25)
+# heatmap.2(as.matrix(sampleDists), key=T, key.xlab="Value", key.ylab="count", symkey=FALSE, keysize= 0.2, trace="none", key.par = list(cex=0.8), lhei=c(1.5,3), lwid=c(3,6),
+#           col=colorpanel(50, "black", "white"),
+#           margin=c(10, 10))
+# dev.off()
+# 
+# #this one for sample distance calculated using rlog transformation without accounting for design (blind=TRUE)
+# 
+# sampleDists <- as.matrix(dist(t(assay(rld_blind_T))))
+# ncol(sampleDists)
+# 
+# grDevices::cairo_pdf(file="qc-heatmap-samples_rld_blind_T.pdf", width=20, height=20, pointsize=25)
+# heatmap.2(as.matrix(sampleDists), key=T, key.xlab="Value", key.ylab="count", symkey=FALSE, keysize= 0.2, trace="none", key.par = list(cex=0.8), lhei=c(1.5,3), lwid=c(3,6),
+#           col=colorpanel(50, "black", "white"),
+#           margin=c(10, 10))
+# dev.off()
+# 
+# ## ---- Principal components analysis (PCA) ----------------------------------------
+# 
+# ##could be done with built-in DESeq2 function:
+# #DESeq2::plotPCA(rld, intgroup="group")
+# ##here we'll used a method from Stephen Turner, @genetics_blog
+# 
+# #using rlog transformation using the experimental design to remove batch variation (blind=FALSE) without removing batch effect with limma
+# 
+# png(file="qc-pca_rld_blind_F_no_limma.png", 1500, 1500, pointsize=20)
+# rld_pca <- function (rld_blind_F_no_limma, intgroup = c("condition","time"), ntop = 500, colors=NULL, legendpos="bottomleft", main="PCA Biplot", textcx=1, repel=TRUE, ...) {
+#   require(genefilter)
+#   require(calibrate)
+#   require(RColorBrewer)
+#   require(DESeq2)
+#   rv = rowVars(assay(rld_blind_F_no_limma))
+#   select = order(rv, decreasing = TRUE)[seq_len(min(ntop, length(rv)))]
+#   pca = prcomp(t(assay(rld_blind_F_no_limma)[select, ]))
+#   fac = factor(apply(as.data.frame(colData(rld_blind_F_no_limma)[, intgroup, drop = FALSE]), 1, paste, collapse = " : "))
+#   if (is.null(colors)) {
+#     if (nlevels(fac) >= 3) {
+#       colors = brewer.pal(nlevels(fac), "Paired")
+#     }   else {
+#       colors = c("black", "#ff0000")
+#     }
+#   }
+#   pc1var <- round(summary(pca)$importance[2,1]*100, digits=1)
+#   pc2var <- round(summary(pca)$importance[2,2]*100, digits=1)
+#   pc1lab <- paste0("PC1 (",as.character(pc1var),"%)")
+#   pc2lab <- paste0("PC1 (",as.character(pc2var),"%)")
+#   plot(PC2~PC1, data=as.data.frame(pca$x), bg=colors[fac], pch=21, xlab=pc1lab, ylab=pc2lab, main=main, ...)
+#   with(as.data.frame(pca$x), textxy(PC1, PC2, labs=rownames(as.data.frame(pca$x)), cex=textcx))
+#   legend(legendpos, legend=levels(fac), col=colors, pch=20)
+#   #     rldyplot(PC2 ~ PC1, groups = fac, data = as.data.frame(pca$rld),
+#   #            pch = 16, cerld = 2, aspect = "iso", col = colours, main = draw.key(key = list(rect = list(col = colours),
+#   #                                                                                         terldt = list(levels(fac)), rep = FALSE)))
+# }
+# rld_pca(rld_blind_F_no_limma, colors=mycols, intgroup=c("condition","time"), xlim=c(-50, 50))
+# dev.off()
+# 
+# #using rlog transformation using the experimental design to remove batch variation (blind=FALSE)
+# 
+# png(file="qc-pca_rld_blind_F.png", 1500, 1500, pointsize=20)
+# rld_pca <- function (rld_blind_F, intgroup = c("condition","time"), ntop = 500, colors=NULL, legendpos="bottomleft", main="PCA Biplot", textcx=1, ...) {
+#   require(genefilter)
+#   require(calibrate)
+#   require(RColorBrewer)
+#   require(DESeq2)
+#   rv = rowVars(assay(rld_blind_F))
+#   select = order(rv, decreasing = TRUE)[seq_len(min(ntop, length(rv)))]
+#   pca = prcomp(t(assay(rld_blind_F)[select, ]))
+#   fac = factor(apply(as.data.frame(colData(rld_blind_F)[, intgroup, drop = FALSE]), 1, paste, collapse = " : "))
+#   if (is.null(colors)) {
+#     if (nlevels(fac) >= 3) {
+#       colors = brewer.pal(nlevels(fac), "Paired")
+#     }   else {
+#       colors = c("black", "#ff0000")
+#     }
+#   }
+#   pc1var <- round(summary(pca)$importance[2,1]*100, digits=1)
+#   pc2var <- round(summary(pca)$importance[2,2]*100, digits=1)
+#   pc1lab <- paste0("PC1 (",as.character(pc1var),"%)")
+#   pc2lab <- paste0("PC1 (",as.character(pc2var),"%)")
+#   plot(PC2~PC1, data=as.data.frame(pca$x), bg=colors[fac], pch=21, xlab=pc1lab, ylab=pc2lab, main=main, ...)
+#   with(as.data.frame(pca$x), textxy(PC1, PC2, labs=rownames(as.data.frame(pca$x)), cex=textcx))
+#   legend(legendpos, legend=levels(fac), col=colors, pch=20)
+#   #     rldyplot(PC2 ~ PC1, groups = fac, data = as.data.frame(pca$rld),
+#   #            pch = 16, cerld = 2, aspect = "iso", col = colours, main = draw.key(key = list(rect = list(col = colours),
+#   #                                                                                         terldt = list(levels(fac)), rep = FALSE)))
+# }
+# rld_pca(rld_blind_F, colors=mycols, intgroup=c("condition","time"), xlim=c(-50, 50))
+# dev.off()
+# 
+# #this one uses rlog transformation without accounting for design (blind=TRUE)
+# png(file="qc-pca_rld_blind_T.png", 1500, 1500, pointsize=20)
+# rld_pca <- function (rld_blind_T, intgroup = c("condition","time"), ntop = 500, colors=NULL, legendpos="bottomleft", main="PCA Biplot", textcx=1, ...) {
+#   require(genefilter)
+#   require(calibrate)
+#   require(RColorBrewer)
+#   require(DESeq2)
+#   rv = rowVars(assay(rld_blind_T))
+#   select = order(rv, decreasing = TRUE)[seq_len(min(ntop, length(rv)))]
+#   pca = prcomp(t(assay(rld_blind_T)[select, ]))
+#   fac = factor(apply(as.data.frame(colData(rld_blind_T)[, intgroup, drop = FALSE]), 1, paste, collapse = " : "))
+#   if (is.null(colors)) {
+#     if (nlevels(fac) >= 3) {
+#       colors = brewer.pal(nlevels(fac), "Paired")
+#     }   else {
+#       colors = c("black", "#ff0000")
+#     }
+#   }
+#   pc1var <- round(summary(pca)$importance[2,1]*100, digits=1)
+#   pc2var <- round(summary(pca)$importance[2,2]*100, digits=1)
+#   pc1lab <- paste0("PC1 (",as.character(pc1var),"%)")
+#   pc2lab <- paste0("PC1 (",as.character(pc2var),"%)")
+#   plot(PC2~PC1, data=as.data.frame(pca$x), bg=colors[fac], pch=21, xlab=pc1lab, ylab=pc2lab, main=main, ...)
+#   with(as.data.frame(pca$x), textxy(PC1, PC2, labs=rownames(as.data.frame(pca$x)), cex=textcx))
+#   legend(legendpos, legend=levels(fac), col=colors, pch=20)
+#   #     rldyplot(PC2 ~ PC1, groups = fac, data = as.data.frame(pca$rld),
+#   #            pch = 16, cerld = 2, aspect = "iso", col = colours, main = draw.key(key = list(rect = list(col = colours),
+#   #                                                                                         terldt = list(levels(fac)), rep = FALSE)))
+# }
+# rld_pca(rld_blind_T, colors=mycols, intgroup=c("condition","time"), xlim=c(-50, 50))
+# dev.off()
+
+#here we check the PCA and sample distance heatmaps and decide if there are sample outliers
+#we can extract the outliers from the countdata and coldata before we continue with analyzing DE 
+print(rownames(colData(dds)))
+#here we remove from the colData outlier samples (we specify the rownumber from colData)
+#they are samples: no_nic_T2_R4, no_nic_T2_R5, no_nic_T3_R4, nic_T1_R12, nic_T3_R12 for kept_samples_2
+#dds <- dds[,-c(11,12,18,26,36)]
+
+#they are samples: no_nic_T2_R4, no_nic_T2_R5, no_nic_T3_R4 for kept_samples
+# dds <- dds[,-c(11,12,18)]
+dds <- dds[,-12]
+
+#check the samples kept in colData
+print(rownames(colData(dds)))
+#now we can generate again the PCA and sample distance heatmaps with the new dds object
+
+# #create directory in which to save kept sample QC results
+dir.create("D:/Activitati/Doctorat/4_REFERAT2/date/DESeq2_analysis_results/kept_samples_QC/")
+setwd("D:/Activitati/Doctorat/4_REFERAT2/date/DESeq2_analysis_results/kept_samples_QC/")
+
+## ----prefilter----------------------------------------------------------------
+#keep only rows that have a count of at least 10 for a minimal number of sample
+#the count of 10 is a reasonable choice for bulk RNA-seq
+#a recommendation for the minimal number of samples is to specify the smallest group size, e.g. 3 treated samples 
+# smallestGroupSize <- 5
+# keep <- rowSums(counts(dds) >= 10) >= smallestGroupSize
+# dds <- dds[keep,]
+
+# ## ----Regularized log transformation (rlog/rlogTransformation) for data visualization----------------------------------------------------
+# #if blind=FALSE rlog uses design formula to calculate the within-group variability (HERE = BIOLOGICAL REPLICATES)
+# #(https://rdrr.io/bioc/DESeq2/man/rlog.html) 
+# 
+# rld_blind_F <- rlogTransformation(dds, blind=FALSE) # this will be later overwritten
+# rld_blind_F_no_limma <- rld_blind_F
+# 
+# #if blind=TRUE rlog calculates the across-all-samples variability
+# rld_blind_T <- rlogTransformation(dds, blind=TRUE)
+# 
+# #to visualize the transformed data with batch variation removed, use the removeBatchEffect function from limma
+# #this simply removes any shifts in the log2-scale expression data that can be explained by batch
+# #https://www.bioconductor.org/packages/release/bioc/vignettes/DESeq2/inst/doc/DESeq2.html#control-features-for-estimating-size-factors
+# #Why after VST are there still batches in the PCA Biplot?
+# library("limma")
+# 
+# mat <- assay(rld_blind_F)
+# mm <- model.matrix(~time+condition+condition:time, colData(rld_blind_F))
+# mat <- limma::removeBatchEffect(mat, batch=rld_blind_F$batch, design=mm)
+# assay(rld_blind_F) <- mat
+# 
+# ## ----Effects of transformations on the variance
+# # The figure below plots the standard deviation of the transformed data, across samples, against the mean, using the rlog transformation
+# #Note that the vertical axis in such plots is the square root of the variance over all samples, so including the variance due to the experimental conditions. 
+# #While a flat curve of the square root of variance over the mean may seem like the goal of such transformations, this may be unreasonable in the case of datasets with many true differences due to the experimental conditions.
+# 
+# library("vsn")
+# 
+# #this one shows effect of transformation using the experimental design without limma to remove batch variation
+# grDevices::cairo_pdf(file="stdev_rld_blind_F_no_limma_vs_mean.pdf")
+# meanSdPlot(assay(rld_blind_F_no_limma))
+# dev.off()
+# 
+# #this one shows effect of transformation using the experimental design with limma to remove batch variation
+# grDevices::cairo_pdf(file="stdev_rld_blind_F_vs_mean.pdf")
+# meanSdPlot(assay(rld_blind_F))
+# dev.off()
+# 
+# #this one shows effect of transformation across all samples without accounting for experimental design
+# grDevices::cairo_pdf(file="stdev_rld_blind_T_vs_mean.pdf")
+# meanSdPlot(assay(rld_blind_T))
+# dev.off()
+# 
+# ## ----Sample distance heatmap ------------------------------------------------
+# 
+# # Colours for plots below
+# ##use RColorBrewer or any from https://github.com/EmilHvitfeldt/r-color-palettes
+# #library("RColorBrewer") or make a vector for color values wanted (can also make a gradient using https://mycolor.space/gradient3
+# # #ff0000, #ff5400, #ff7b00, #ff9b19, #ffb73a, #ffab3f, #ff9f44, #ff944a, #ff5658, #ff0084, #d300c2, #0432ff
+# mycols <- c("#ff0000", "#FFD966","#0432FF", "#3b3b3b", "#777777", "#b9b9b9")
+# 
+# #this one for sample distance calculated using rlog transformation using the experimental design (blind=FALSE) without limma to remove batch variation
+# library(gplots)
+# 
+# sampleDists <- as.matrix(dist(t(assay(rld_blind_F_no_limma))))
+# ncol(sampleDists)
+# grDevices::cairo_pdf(file="qc-heatmap-samples_rld_blind_F_no_limma.pdf", width=20, height=20, pointsize=25)
+# heatmap.2(as.matrix(sampleDists), key=T, key.xlab="Value", key.ylab="count", symkey=FALSE, keysize= 0.2, trace="none", key.par = list(cex=0.8), lhei=c(1.5,3), lwid=c(3,6),
+#           col=colorpanel(50, "black", "white"), 
+#           margin=c(10, 10))
+# dev.off()
+# 
+# #this one for sample distance calculated using rlog transformation using the experimental design to remove batch variation (blind=FALSE)
+# sampleDists <- as.matrix(dist(t(assay(rld_blind_F))))
+# ncol(sampleDists)
+# 
+# grDevices::cairo_pdf(file="qc-heatmap-samples_rld_blind_F.pdf", width=20, height=20, pointsize=25)
+# heatmap.2(as.matrix(sampleDists), key=T, key.xlab="Value", key.ylab="count", symkey=FALSE, keysize= 0.2, trace="none", key.par = list(cex=0.8), lhei=c(1.5,3), lwid=c(3,6),
+#           col=colorpanel(50, "black", "white"), 
+#           margin=c(10, 10))
+# dev.off()
+# 
+# #this one for sample distance calculated using rlog transformation without accounting for design (blind=TRUE)
+# sampleDists <- as.matrix(dist(t(assay(rld_blind_T))))
+# ncol(sampleDists)
+# 
+# grDevices::cairo_pdf(file="qc-heatmap-samples_rld_blind_T.pdf", width=20, height=20, pointsize=25)
+# heatmap.2(as.matrix(sampleDists), key=T, key.xlab="Value", key.ylab="count", symkey=FALSE, keysize= 0.2, trace="none", key.par = list(cex=0.8), lhei=c(1.5,3), lwid=c(3,6),
+#           col=colorpanel(50, "black", "white"), 
+#           margin=c(10, 10))
+# dev.off()
+# 
+# ## ---- Principal components analysis (PCA) ----------------------------------------
+# 
+# ##could be done with built-in DESeq2 function:
+# #DESeq2::plotPCA(rld, intgroup="group")
+# ##here we'll used a method from Stephen Turner, @genetics_blog
+# 
+# #using rlog transformation using the experimental design to remove batch variation (blind=FALSE) without removing batch effect with limma
+# 
+# png(file="qc-pca_rld_blind_F_no_limma.png", 1500, 1500, pointsize=20)
+# rld_pca <- function (rld_blind_F_no_limma, intgroup = c("condition","time"), ntop = 500, colors=NULL, legendpos="bottomleft", main="PCA Biplot", textcx=1, repel=TRUE, ...) {
+#   require(genefilter)
+#   require(calibrate)
+#   require(RColorBrewer)
+#   require(DESeq2)
+#   rv = rowVars(assay(rld_blind_F_no_limma))
+#   select = order(rv, decreasing = TRUE)[seq_len(min(ntop, length(rv)))]
+#   pca = prcomp(t(assay(rld_blind_F_no_limma)[select, ]))
+#   fac = factor(apply(as.data.frame(colData(rld_blind_F_no_limma)[, intgroup, drop = FALSE]), 1, paste, collapse = " : "))
+#   if (is.null(colors)) {
+#     if (nlevels(fac) >= 3) {
+#       colors = brewer.pal(nlevels(fac), "Paired")
+#     }   else {
+#       colors = c("black", "#ff0000")
+#     }
+#   }
+#   pc1var <- round(summary(pca)$importance[2,1]*100, digits=1)
+#   pc2var <- round(summary(pca)$importance[2,2]*100, digits=1)
+#   pc1lab <- paste0("PC1 (",as.character(pc1var),"%)")
+#   pc2lab <- paste0("PC1 (",as.character(pc2var),"%)")
+#   plot(PC2~PC1, data=as.data.frame(pca$x), bg=colors[fac], pch=21, xlab=pc1lab, ylab=pc2lab, main=main, ...)
+#   with(as.data.frame(pca$x), textxy(PC1, PC2, labs=rownames(as.data.frame(pca$x)), cex=textcx))
+#   legend(legendpos, legend=levels(fac), col=colors, pch=20)
+#   #     rldyplot(PC2 ~ PC1, groups = fac, data = as.data.frame(pca$rld),
+#   #            pch = 16, cerld = 2, aspect = "iso", col = colours, main = draw.key(key = list(rect = list(col = colours),
+#   #                                                                                         terldt = list(levels(fac)), rep = FALSE)))
+# }
+# rld_pca(rld_blind_F_no_limma, colors=mycols, intgroup=c("condition","time"), xlim=c(-50, 50))
+# dev.off()
+# 
+# #using rlog transformation using the experimental design to remove batch variation (blind=FALSE)
+# 
+# png(file="qc-pca_rld_blind_F.png", 1500, 1500, pointsize=20)
+# rld_pca <- function (rld_blind_F, intgroup = c("condition","time"), ntop = 500, colors=NULL, legendpos="bottomleft", main="PCA Biplot", textcx=1, ...) {
+#   require(genefilter)
+#   require(calibrate)
+#   require(RColorBrewer)
+#   require(DESeq2)
+#   rv = rowVars(assay(rld_blind_F))
+#   select = order(rv, decreasing = TRUE)[seq_len(min(ntop, length(rv)))]
+#   pca = prcomp(t(assay(rld_blind_F)[select, ]))
+#   fac = factor(apply(as.data.frame(colData(rld_blind_F)[, intgroup, drop = FALSE]), 1, paste, collapse = " : "))
+#   if (is.null(colors)) {
+#     if (nlevels(fac) >= 3) {
+#       colors = brewer.pal(nlevels(fac), "Paired")
+#     }   else {
+#       colors = c("black", "#ff0000")
+#     }
+#   }
+#   pc1var <- round(summary(pca)$importance[2,1]*100, digits=1)
+#   pc2var <- round(summary(pca)$importance[2,2]*100, digits=1)
+#   pc1lab <- paste0("PC1 (",as.character(pc1var),"%)")
+#   pc2lab <- paste0("PC1 (",as.character(pc2var),"%)")
+#   plot(PC2~PC1, data=as.data.frame(pca$x), bg=colors[fac], pch=21, xlab=pc1lab, ylab=pc2lab, main=main, ...)
+#   with(as.data.frame(pca$x), textxy(PC1, PC2, labs=rownames(as.data.frame(pca$x)), cex=textcx))
+#   legend(legendpos, legend=levels(fac), col=colors, pch=20)
+#   #     rldyplot(PC2 ~ PC1, groups = fac, data = as.data.frame(pca$rld),
+#   #            pch = 16, cerld = 2, aspect = "iso", col = colours, main = draw.key(key = list(rect = list(col = colours),
+#   #                                                                                         terldt = list(levels(fac)), rep = FALSE)))
+# }
+# rld_pca(rld_blind_F, colors=mycols, intgroup=c("condition","time"), xlim=c(-50, 50))
+# dev.off()
+# 
+# #this one uses rlog transformation without accounting for design (blind=TRUE)
+# png(file="qc-pca_rld_blind_T.png", 1500, 1500, pointsize=20)
+# rld_pca <- function (rld_blind_T, intgroup = c("condition","time"), ntop = 500, colors=NULL, legendpos="bottomleft", main="PCA Biplot", textcx=1, ...) {
+#   require(genefilter)
+#   require(calibrate)
+#   require(RColorBrewer)
+#   require(DESeq2)
+#   rv = rowVars(assay(rld_blind_T))
+#   select = order(rv, decreasing = TRUE)[seq_len(min(ntop, length(rv)))]
+#   pca = prcomp(t(assay(rld_blind_T)[select, ]))
+#   fac = factor(apply(as.data.frame(colData(rld_blind_T)[, intgroup, drop = FALSE]), 1, paste, collapse = " : "))
+#   if (is.null(colors)) {
+#     if (nlevels(fac) >= 3) {
+#       colors = brewer.pal(nlevels(fac), "Paired")
+#     }   else {
+#       colors = c("black", "#ff0000")
+#     }
+#   }
+#   pc1var <- round(summary(pca)$importance[2,1]*100, digits=1)
+#   pc2var <- round(summary(pca)$importance[2,2]*100, digits=1)
+#   pc1lab <- paste0("PC1 (",as.character(pc1var),"%)")
+#   pc2lab <- paste0("PC1 (",as.character(pc2var),"%)")
+#   plot(PC2~PC1, data=as.data.frame(pca$x), bg=colors[fac], pch=21, xlab=pc1lab, ylab=pc2lab, main=main, ...)
+#   with(as.data.frame(pca$x), textxy(PC1, PC2, labs=rownames(as.data.frame(pca$x)), cex=textcx))
+#   legend(legendpos, legend=levels(fac), col=colors, pch=20)
+#   #     rldyplot(PC2 ~ PC1, groups = fac, data = as.data.frame(pca$rld),
+#   #            pch = 16, cerld = 2, aspect = "iso", col = colours, main = draw.key(key = list(rect = list(col = colours),
+#   #                                                                                         terldt = list(levels(fac)), rep = FALSE)))
+# }
+# rld_pca(rld_blind_T, colors=mycols, intgroup=c("condition","time"), xlim=c(-50, 50))
+# dev.off()
+
+## ----run the DESeq2 pipeline------------------------------------------------------------------
+#check that colData has outlier samples removed
+print(rownames(colData(dds)))
+
+# #THIS IS FOR TIME SERIES AND CONDITION using a REDUCED MODEL 
+# #https://f1000research.com/articles/4-1070/v2 - Time course experiments
+# dds<-DESeq(dds, test="LRT", reduced = ~ condition + time)
+# res<-results(dds)
+# resOrdered <- res[order(res$padj),]
+# write.csv(as.data.frame(resOrdered), file="res_reduced.csv")
+# head(res[order(res$padj),],5)
+
+dds <- DESeq(dds)
+res_T1_nic_vs_no_nic <- results(dds, contrast=c("group","nic_T1","no_nic_T1"))
+res_T1_nic_vs_no_nic_Ordered <- res_T1_nic_vs_no_nic[order(res_T1_nic_vs_no_nic$padj),]
+write.csv(as.data.frame(res_T1_nic_vs_no_nic_Ordered), file="res_genenames_T1_nic_vs_no_nic.csv")
+
+res_T2_nic_vs_no_nic <- results(dds, contrast=c("group","nic_T2","no_nic_T2"))
+res_T2_nic_vs_no_nic_Ordered <- res_T2_nic_vs_no_nic[order(res_T2_nic_vs_no_nic$padj),]
+write.csv(as.data.frame(res_T2_nic_vs_no_nic_Ordered), file="res_genenames_T2_nic_vs_no_nic.csv")
+
+res_T3_nic_vs_no_nic <- results(dds, contrast=c("group","nic_T3","no_nic_T3"))
+res_T3_nic_vs_no_nic_Ordered <- res_T3_nic_vs_no_nic[order(res_T3_nic_vs_no_nic$padj),]
+write.csv(as.data.frame(res_T3_nic_vs_no_nic_Ordered), file="res_genenames_T3_nic_vs_no_nic.csv")
+
+res_nic_T3_vs_nic_T1 <- results(dds, contrast=c("group","nic_T2","nic_T1"))
+res_nic_T3_vs_nic_T1_Ordered <- res_nic_T3_vs_nic_T1[order(res_nic_T3_vs_nic_T1$padj),]
+write.csv(as.data.frame(res_nic_T3_vs_nic_T1_Ordered), file="res_genenames_nic_T3_vs_nic_T1.csv")
+
+res_nic_T3_vs_nic_T1 <- results(dds, contrast=c("group","nic_T3","nic_T1"))
+res_nic_T3_vs_nic_T1_Ordered <- res_nic_T3_vs_nic_T1[order(res_nic_T3_vs_nic_T1$padj),]
+write.csv(as.data.frame(res_nic_T3_vs_nic_T1_Ordered), file="res_genenames_nic_T3_vs_nic_T1.csv")
+
+res_nic_T3_vs_nic_T2 <- results(dds, contrast=c("group","nic_T3","nic_T2"))
+res_nic_T3_vs_nic_T2_Ordered <- res_nic_T3_vs_nic_T2[order(res_nic_T3_vs_nic_T2$padj),]
+write.csv(as.data.frame(res_nic_T3_vs_nic_T2_Ordered), file="res_genenames_nic_T3_vs_nic_T2.csv")
+
+# #Wald tests for the log2 fold changes at individual time points can be investigated using the test argument to results:
+# resultsNames(dds)
+# 
+# res_condition_nic_vs_no_nic <- results(dds, name="condition_nic_vs_no_nic", test="Wald")
+# write.csv(as.data.frame(res_condition_nic_vs_no_nic[order(res_condition_nic_vs_no_nic$padj),]), file="condition_nic_vs_no_nic.csv")
+# 
+# res_time_T2_vs_T1 <- results(dds, name="time_T2_vs_T1", test="Wald")
+# write.csv(as.data.frame(res_time_T2_vs_T1[order(res_time_T2_vs_T1$padj),]), file="time_T2_vs_T1.csv")
+# 
+# res_time_T3_vs_T1 <- results(dds, name="time_T3_vs_T1", test="Wald")
+# write.csv(as.data.frame(res_time_T3_vs_T1[order(res_time_T3_vs_T1$padj),]), file="time_T3_vs_T1.csv")
+# 
+# res_conditionnic.timeT2 <- results(dds, name="conditionnic.timeT2", test="Wald")
+# write.csv(as.data.frame(res_conditionnic.timeT2[order(res_conditionnic.timeT2$padj),]), file="conditionnic.timeT2.csv")
+# 
+# res_conditionnic.timeT3 <- results(dds, name="conditionnic.timeT3", test="Wald")
+# write.csv(as.data.frame(res_conditionnic.timeT3[order(res_conditionnic.timeT3$padj),]), file="conditionnic.timeT3.csv")
+# 
+# data <- plotCounts(dds, which.min(res$padj), intgroup=c("condition","time"), returnData=TRUE)
+# ggplot(data, aes(x=time, y=count, color=condition, group=condition)) + geom_point() + stat_smooth(se=FALSE,method="loess") + scale_y_log10()
+
+## ---- Plot dispersions------------------------------------------------------------------
+png(file="dds_qc-dispersions.png", 1000, 1000, pointsize=20)
+plotDispEsts(dds, cex=1, main="Dispersion plot", xlab="mean of normalized counts", ylab="dispersion")
+dev.off()
+
+# # ----Gene heatmap: cluster significant genes by their profiles ------------------------------------------------------------------
+# #We extract a matrix of the shrunken log2 fold changes using the coef function:
+# betas <- coef(dds)
+# colnames(betas)
+# 
+# #make the heatmap
+# library("pheatmap")
+# topGenes <- head(order(res$padj),11)
+# mat <- betas[topGenes, -c(1,2)]
+# thr <- 7
+# mat[mat < -thr] <- -thr
+# mat[mat > thr] <- thr
+# png(file="timecourse_heatmap.png", 400, 600, pointsize=40)
+# pheatmap(mat, breaks=seq(from=-thr, to=thr, length=101), cluster_col=FALSE, border_col=NA, fontsize=15)
+# dev.off()
+# 
+# resOrdered2 <- res_conditionnic.timeT3[order(res_conditionnic.timeT3$padj),]
+
+
+## ----MA Plot with labels ---------------------------------------------------
+#could be done with built-in DESeq2 function:
+#DESeq2::plotMA(dds, ylim=c(-1,1), cex=1)
+##here we'll used a method from Stephen Turner, @genetics_blog
+#labs=rownames(resOrdered)
+maplot <- function (res_nic_T3_vs_nic_T2_Ordered, thresh=0.1, labelsig=TRUE, textcx=1, ...) {
+  with(res_nic_T3_vs_nic_T2_Ordered, plot(baseMean, log2FoldChange, pch=20, cex=.5, log="x", ...))
+  with(subset(res_nic_T3_vs_nic_T2_Ordered, padj<thresh), points(baseMean, log2FoldChange, col="#ff0000", pch=20, cex=1.5))
+  if (labelsig) {
+    require(calibrate)
+    with(subset(res_nic_T3_vs_nic_T2_Ordered, padj<thresh), textxy(baseMean, log2FoldChange, labs=rownames(subset(res_nic_T3_vs_nic_T2_Ordered, padj<thresh)), cex=1, col="black"))
+  }
+}
+png(file="MAplot_nic_T3_vs_nic_T2_labs.png", 1500, 1000, pointsize=20)
+maplot(res_nic_T3_vs_nic_T2_Ordered, main="nic_T3_vs_nic_T2")
+dev.off()
+
+## ----Volcano plot with labels ---------------------------------------------------
+#Volcano plot with "significant" genes labeled
+volcanoplot <- function (res_nic_T3_vs_nic_T2_Ordered, lfcthresh=1, sigthresh=0.1, main="nic_T3_vs_nic_T2", legendpos="bottomright", labelsig=TRUE, textcx=1, ...) {
+  with(res_nic_T3_vs_nic_T2_Ordered, plot(log2FoldChange, -log10(pvalue), pch=20, main=main, ...))
+  with(subset(res_nic_T3_vs_nic_T2_Ordered, padj<sigthresh ), points(log2FoldChange, -log10(pvalue), pch=20, col="#ff0000", ...))
+  with(subset(res_nic_T3_vs_nic_T2_Ordered, abs(log2FoldChange)>lfcthresh), points(log2FoldChange, -log10(pvalue), pch=20, col="#0432FF", ...))
+  with(subset(res_nic_T3_vs_nic_T2_Ordered, padj<sigthresh & abs(log2FoldChange)>lfcthresh), points(log2FoldChange, -log10(pvalue), pch=20, col="#821980", ...))
+  if (labelsig) {
+    require(calibrate)
+    with(subset(res_nic_T3_vs_nic_T2_Ordered, padj<sigthresh & abs(log2FoldChange)>lfcthresh), textxy(log2FoldChange, -log10(pvalue), labs=rownames(subset(res_nic_T3_vs_nic_T2_Ordered, padj<sigthresh & abs(log2FoldChange)>lfcthresh)), cex=0.8, ...))
+  }
+  legend(legendpos, xjust=1, yjust=1, legend=c(paste("p-adj < ",sigthresh,sep=""), paste("|LogFC| > ", lfcthresh,sep=""), paste("p-adj < ", sigthresh, " & |LogFC| > ", lfcthresh, sep="")), pch=20, col=c("red","blue","purple"))
+}
+png(file="volcanoplot_nic_T3_vs_nic_T2_labs.png", 1500, 1000, pointsize=20)
+volcanoplot(res_nic_T3_vs_nic_T2_Ordered, lfcthresh=1, sigthresh=0.1, textcx=.8, xlim=c(-8, 8))
+dev.off()
+
+## ----MA Plot no labels ---------------------------------------------------
+#could be done with built-in DESeq2 function:
+#DESeq2::plotMA(dds, ylim=c(-1,1), cex=1)
+##here we'll used a method from Stephen Turner, @genetics_blog
+#labs=rownames(resOrdered)
+maplot <- function (res_nic_T3_vs_nic_T2_Ordered, thresh=0.1, labelsig=TRUE, textcx=1, ...) {
+  with(res_nic_T3_vs_nic_T2_Ordered, plot(baseMean, log2FoldChange, pch=20, cex=.5, log="x", ...))
+  with(subset(res_nic_T3_vs_nic_T2_Ordered, padj<thresh), points(baseMean, log2FoldChange, col="#ff0000", pch=20, cex=1.5))
+  if (labelsig) {
+    require(calibrate)
+    with(subset(res_nic_T3_vs_nic_T2_Ordered, padj<thresh), textxy(baseMean, log2FoldChange, labs=NULL, cex=1, col="black"))
+  }
+}
+png(file="MAplot_nic_T3_vs_nic_T2.png", 1500, 1000, pointsize=20)
+maplot(res_nic_T3_vs_nic_T2_Ordered, main="nic_T3_vs_nic_T2")
+dev.off()
+
+## ----Volcano plot no labels ---------------------------------------------------
+#Volcano plot with "significant" genes labeled
+volcanoplot <- function (res_nic_T3_vs_nic_T2_Ordered, lfcthresh=1, sigthresh=0.1, main="nic_T3_vs_nic_T2", legendpos="bottomright", labelsig=TRUE, textcx=1, ...) {
+  with(res_nic_T3_vs_nic_T2_Ordered, plot(log2FoldChange, -log10(pvalue), pch=20, main=main, ...))
+  with(subset(res_nic_T3_vs_nic_T2_Ordered, padj<sigthresh ), points(log2FoldChange, -log10(pvalue), pch=20, col="#ff0000", ...))
+  with(subset(res_nic_T3_vs_nic_T2_Ordered, abs(log2FoldChange)>lfcthresh), points(log2FoldChange, -log10(pvalue), pch=20, col="#0432FF", ...))
+  with(subset(res_nic_T3_vs_nic_T2_Ordered, padj<sigthresh & abs(log2FoldChange)>lfcthresh), points(log2FoldChange, -log10(pvalue), pch=20, col="#821980", ...))
+  if (labelsig) {
+    require(calibrate)
+    with(subset(res_nic_T3_vs_nic_T2_Ordered, padj<sigthresh & abs(log2FoldChange)>lfcthresh), textxy(log2FoldChange, -log10(pvalue), labs=NULL, cex=0.8, ...))
+  }
+  legend(legendpos, xjust=1, yjust=1, legend=c(paste("p-adj < ",sigthresh,sep=""), paste("|LogFC| > ", lfcthresh,sep=""), paste("p-adj < ", sigthresh, " & |LogFC| > ", lfcthresh, sep="")), pch=20, col=c("red","blue","purple"))
+}
+png(file="volcanoplot_nic_T3_vs_nic_T2.png", 1500, 1000, pointsize=20)
+volcanoplot(res_nic_T3_vs_nic_T2_Ordered, lfcthresh=1, sigthresh=0.1, textcx=.8, xlim=c(-8, 8))
+dev.off()
+
+## ----Plot the normalized counts of reads a single gene across the groups --------------------------------
+## explained: https://bioconductor.org/packages/devel/bioc/vignettes/DESeq2/inst/doc/DESeq2.html
+#this says to plot counts for THE gene with min padj
+# plotCounts(dds, gene=which.min(res$padj), intgroup=c("condition","time"))
+# 
+# #this says to plot counts for gene with specified ID
+# png(file="plot_counts.png", 1000, 1000, pointsize=30)
+# plotCounts(dds, gene='nit', intgroup=c("condition","time"))
+# dev.off()
+
+# OTHER OPTIONS------------------------------------------
+
+## ----droplevels---------------------------------------------------------------
+#use this when contrasting samples within the same condition/ time (no_nic OR nic) to remove the factor
+#dds$condition <- droplevels(dds$condition)
+
+## ----sumRes01-----------------------------------------------------------------
+#sum(resOrdered$padj < 0.1, na.rm=TRUE)
+
+# Get normalized counts from dds object data - the same counts used to calculate DESeq2 results
+#normalized_counts<-counts(dds, normalized=TRUE)
+
+# Merge differential expression results with deseq2.results.txt (DESeq2 results from nf-core/nanoseq; can be reproduced with results(dds))
+#resdata <- merge(as.data.frame(res), as.data.frame(normalized_counts), by="row.names", sort=FALSE)
+#names(resdata)[1] <- "Gene"
+
+## Write normalized_counts to csv (Will be used in another script, in python, to merge counts with geneids)
+#write.csv(normalized_counts, file="D:/Activitati/Doctorat/4_REFERAT2/DESeq/nic_T1_vs_T3_12345/normalized_counts.csv")
+
+## ----Plot histogram of assay of Regularized log transformation
+#png(file="D:/Activitati/Doctorat/4_REFERAT2/DESeq/plots/nic_T1_vs_T3_12345/histogram_assay_rld.png", 1000, 1000, pointsize=20)
+#hist(assay(rld))
+#dev.off()
+
+# ## ---- Examine plot of p-values with NA
+# #png(file="histogram_p_values.png", w=1000, h=1000, pointsize=20)
+# hist(res$pvalue, breaks=50, col="grey")
+# dev.off()
+#
+# # Examine plot of p-values != NA
+# res_no_NA = subset(res, !is.na(res$pvalue))
+# png(file="histogram_p_values_no_NA.png", w=1000, h=1000, pointsize=20)
+# hist(res_no_NA$pvalue, breaks=50, col="grey")
+# dev.off()
